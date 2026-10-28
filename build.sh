@@ -310,6 +310,16 @@ else
     echo "✓ Local Electron distribution and Asar binary already present."
 fi
 
+# Electron 44+ installs the npm wrapper without downloading the runtime.
+# Resolving the module invokes its official installer when the runtime is absent.
+if [ ! -d "$ELECTRON_DIST_PATH" ]; then
+    if ! node -e 'require("electron")'; then
+        echo "❌ Failed to download the Electron runtime."
+        cd "$PROJECT_ROOT"
+        exit 1
+    fi
+fi
+
 if [ -d "$ELECTRON_DIST_PATH" ]; then
     echo "✓ Found Electron distribution directory at $ELECTRON_DIST_PATH."
     CHOSEN_ELECTRON_MODULE_PATH="$(realpath "$WORK_DIR/node_modules/electron")"
@@ -317,7 +327,8 @@ if [ -d "$ELECTRON_DIST_PATH" ]; then
 else
     echo "❌ Failed to find Electron distribution directory at '$ELECTRON_DIST_PATH' after installation attempt."
     echo "   Cannot proceed without the Electron distribution files."
-    cd "$PROJECT_ROOT"     exit 1
+    cd "$PROJECT_ROOT"
+    exit 1
 fi
 
 if [ -f "$ASAR_BIN_PATH" ]; then
