@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   check-version:
@@ -16,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ github.token }}
 
       - name: Set up environment
         run: |
@@ -67,91 +68,45 @@ jobs:
           cd /
           rm -rf "$WORK_DIR"
 
-      - name: Check if update needed
+      - name: Check whether this version has a release
         id: check_update
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_VERSION: ${{ steps.check_version.outputs.claude_version }}
+          REPO_VERSION: ${{ vars.REPO_VERSION }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          CLAUDE_VERSION="${{ steps.check_version.outputs.claude_version }}"
-          REPO_VERSION="${{ vars.REPO_VERSION }}"
-          STORED_CLAUDE_VERSION="${{ vars.CLAUDE_DESKTOP_VERSION }}"
-
-          echo "Current stored Claude version: $STORED_CLAUDE_VERSION"
-          echo "Detected Claude version: $CLAUDE_VERSION"
-          echo "Repository version: $REPO_VERSION"
-
-          if [ "$CLAUDE_VERSION" != "$STORED_CLAUDE_VERSION" ]; then
-            echo "New Claude Desktop version detected!"
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-            
-            # Construct the new tag
-            NEW_TAG="v${REPO_VERSION}+claude${CLAUDE_VERSION}"
-            echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-            echo "New tag will be: $NEW_TAG"
-          else
-            echo "Claude Desktop version unchanged"
-            echo "update_needed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update version variable and create tag
-        if: steps.check_update.outputs.update_needed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          CLAUDE_VERSION="${{ steps.check_version.outputs.claude_version }}"
-          NEW_TAG="${{ steps.check_update.outputs.new_tag }}"
-
-          # Check if we have a PAT
-          if [ -z "$GH_TOKEN" ]; then
-            echo "Error: GH_PAT secret is not configured"
+          set -euo pipefail
+          if [[ ! "$CLAUDE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid Claude Desktop version"
             exit 1
           fi
+          if [ -n "$REPO_VERSION" ]; then
+            NEW_TAG="v${REPO_VERSION}+claude${CLAUDE_VERSION}"
+          else
+            NEW_TAG="v${CLAUDE_VERSION}"
+          fi
+          git check-ref-format "refs/tags/$NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          ASSETS=$(gh release view "$NEW_TAG" --json assets --jq '.assets | length' 2>/dev/null || true)
+          if [[ "$ASSETS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "update_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_needed=true" >> "$GITHUB_OUTPUT"
+          fi
 
-          gh variable set CLAUDE_DESKTOP_VERSION --body "$CLAUDE_VERSION"
-
-          echo "Creating and pushing new tag: $NEW_TAG"
-
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Create annotated tag
-          git tag -a "$NEW_TAG" -m "Update to Claude Desktop $CLAUDE_VERSION"
-
-          # Push the tag
-          git push origin "$NEW_TAG"
-
-          echo "Successfully created tag $NEW_TAG"
-
-      - name: Create release
+      - name: Create version tag and dispatch package builds
         if: steps.check_update.outputs.update_needed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.check_update.outputs.new_tag }}
+          CLAUDE_VERSION: ${{ steps.check_version.outputs.claude_version }}
         run: |
-          NEW_TAG="${{ steps.check_update.outputs.new_tag }}"
-          CLAUDE_VERSION="${{ steps.check_version.outputs.claude_version }}"
-
-          # Create release notes using heredoc
-          RELEASE_NOTES=$(cat <<EOF
-          ## Claude Desktop Update
-
-          This release updates the packaged Claude Desktop version to **$CLAUDE_VERSION**.
-
-          ### What's Changed
-          - Updated Claude Desktop to version $CLAUDE_VERSION
-
-          ### Installation
-          Download the appropriate package for your architecture from the assets below.
-
-          ---
-          *This release was automatically generated when a new Claude Desktop version was detected.*
-          EOF
-          )
-
-          # Create the release
-          gh release create "$NEW_TAG" \
-            --title "Release $NEW_TAG" \
-            --notes "$RELEASE_NOTES" \
-            --latest
-
-          echo "Release created for $NEW_TAG"
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git show-ref --verify --quiet "refs/tags/$NEW_TAG"; then
+            git tag -a "$NEW_TAG" -m "Update to Claude Desktop $CLAUDE_VERSION"
+            git push origin "refs/tags/$NEW_TAG"
+          fi
+          # GITHUB_TOKEN tag pushes do not trigger CI; dispatch it explicitly.
+          gh workflow run ci.yml --ref "$NEW_TAG"
